@@ -1,0 +1,186 @@
+# Builds the tv-home launcher on GitHub with the same bare SDK steps as launcher/build-and-install.sh (aapt2, javac,
+# d8, zipalign, apksigner; no Gradle), and puts it on this repo's Releases page with TV-Kit (the Windows scripts) next
+# to it. TV-Kit downloads the launcher from:
+#
+#   https://github.com/<this repo>/releases/latest/download/tvhome.apk
+#
+# Runs on every push to main and by hand: Actions tab > Build APK > Run workflow.
+#
+# One optional repository secret (Settings > Secrets and variables > Actions > New repository secret):
+#   KEYSTORE_PASSWORD  a long password. The first build with it makes the launcher's own signing key,
+#                      signing/release.p12, locks it with that password and saves it to this repo. Every build after
+#                      that is signed with the same key, so each update installs over the last one and keeps the dock.
+#                      Without it each build is signed with a throwaway key, and TV-Kit replaces the launcher (asking
+#                      first) when the key changes.
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "examples/**"
+      - "before-after.png"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # lets the job save the signing key the first time, and publish a release with the APK
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v5
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Get the Android SDK pieces the build uses
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKM=$(ls "$SDK"/cmdline-tools/latest/bin/sdkmanager 2>/dev/null || ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1)
+          [ -n "$SDKM" ] || { echo "::error::sdkmanager wasn't found under $SDK"; exit 1; }
+          yes | "$SDKM" --sdk_root="$SDK" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+
+      - name: Set up the signing key
+        id: signing
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          mkdir -p keystore signing
+          # A space, line break or quotes picked up when pasting the password shouldn't stop it from working.
+          PW=$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d '\r\n' | sed -E "s/^[[:space:]\"'\`]+//; s/[[:space:]\"'\`]+\$//")
+          if [ -z "$PW" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::KEYSTORE_PASSWORD isn't set, so this APK is signed with a throwaway key. See the top of build-apk.yml."
+            exit 0
+          fi
+          if [ ! -f signing/release.p12 ]; then
+            git fetch --quiet --depth 1 origin main 2>/dev/null || true
+            if git cat-file -e origin/main:signing/release.p12 2>/dev/null; then
+              git show origin/main:signing/release.p12 > signing/release.p12
+            else
+              keytool -genkeypair -storetype PKCS12 -keystore signing/release.p12 \
+                -storepass "$PW" -keypass "$PW" -alias tvhome \
+                -keyalg RSA -keysize 4096 -validity 36500 \
+                -dname "CN=tv-home launcher, O=David and Dev" >/dev/null 2>&1
+              echo "new_key=true" >> "$GITHUB_OUTPUT"
+              echo "Made a new signing key. It's saved to the repo once this build works."
+            fi
+          fi
+          cp signing/release.p12 keystore/release.p12
+          ALIAS=$(keytool -list -storetype PKCS12 -keystore keystore/release.p12 -storepass "$PW" 2>/dev/null | grep -m1 PrivateKeyEntry | cut -d, -f1)
+          if [ -n "$ALIAS" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "alias=$ALIAS" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::KEYSTORE_PASSWORD doesn't open signing/release.p12, so this APK is signed with a throwaway key."
+          fi
+
+      - name: Build the launcher
+        run: |
+          set -o pipefail
+          chmod +x launcher/build-and-install.sh
+          launcher/build-and-install.sh --build 2>&1 | tee build.log
+
+      - name: Point out what broke the build
+        if: failure()
+        run: |
+          [ -s build.log ] || exit 0
+          grep -E 'error|Error|ERROR|warning: \[|FAILED' -A2 build.log | head -120 > errors.txt || true
+          [ -s errors.txt ] || exit 0
+          {
+            echo '### What broke'
+            echo '```'
+            cat errors.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sign it
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          ALIAS: ${{ steps.signing.outputs.alias }}
+        run: |
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          if [ "$SIGNED" = "true" ]; then
+            KS_PW=$(printf '%s' "$KEYSTORE_PASSWORD" | tr -d '\r\n' | sed -E "s/^[[:space:]\"'\`]+//; s/[[:space:]\"'\`]+\$//")
+            export KS_PW
+            "$BT/apksigner" sign --ks keystore/release.p12 --ks-type PKCS12 --ks-key-alias "$ALIAS" \
+              --ks-pass env:KS_PW --key-pass env:KS_PW --out tvhome.apk launcher/build/aligned.apk
+          else
+            cp launcher/build/tvhome.apk tvhome.apk
+          fi
+          {
+            echo '### tvhome.apk'
+            echo '```'
+            "$BT/apksigner" verify --verbose --print-certs tvhome.apk 2>&1 | grep -E 'Verifies|Verified using|certificate SHA-256|Number of signers' || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          ls -l tvhome.apk
+
+      - name: Save the new signing key
+        # Before anything is published: an APK signed with a key that wasn't kept could never be updated.
+        if: steps.signing.outputs.new_key == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/signing/release.p12" \
+            -f message="Save the launcher's signing key" \
+            -f content="$(base64 -w0 signing/release.p12)" \
+            -f branch=main > /dev/null \
+            || { echo "::error::Couldn't save the new signing key to the repo, so nothing was published. Run the build again."; exit 1; }
+          echo "Saved signing/release.p12 to main."
+
+      - name: Pack TV-Kit
+        run: |
+          (cd tv-kit && zip -qr ../TV-Kit.zip .) || { echo "::error::Couldn't pack tv-kit/"; exit 1; }
+          ls -l TV-Kit.zip
+
+      - name: Keep a copy with the workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: tv-home-build-${{ github.run_number }}
+          path: |
+            tvhome.apk
+            TV-Kit.zip
+          if-no-files-found: error
+
+      - name: Publish a release with the launcher and TV-Kit
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          NOTE="Signed with the launcher's own key, so it installs over the last version."
+          [ "$SIGNED" = "true" ] || NOTE="Signed with a throwaway key (KEYSTORE_PASSWORD isn't set)."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists (a re-run); keeping it."
+            exit 0
+          fi
+          NEWEST=$(git ls-remote origin refs/heads/main | cut -f1)
+          gh release create "$TAG" tvhome.apk TV-Kit.zip \
+            --target "${NEWEST:-$GITHUB_SHA}" \
+            --title "tv-home launcher (build ${{ github.run_number }})" \
+            --notes "Built from commit ${GITHUB_SHA::7}. $NOTE On a Windows PC: download TV-Kit.zip, extract it and double-click TV-KIT.bat." \
+            --latest
+          # Only the newest five stay, so the page doesn't fill up.
+          gh release list --limit 200 --json tagName --jq '.[].tagName' | grep -E '^build-[0-9]+$' | sort -t- -k2,2nr | tail -n +6 \
+            | while read -r OLD; do gh release delete "$OLD" --yes --cleanup-tag || true; done || true
+          {
+            echo "### Published"
+            echo "Launcher: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/tvhome.apk"
+            echo "TV-Kit: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/TV-Kit.zip"
+          } >> "$GITHUB_STEP_SUMMARY"

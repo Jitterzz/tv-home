@@ -44,6 +44,14 @@ launcher/build-and-install.sh                               # build + install th
 
 Undo everything with `tools/restore.sh <the same list>`.
 
+## Do it on Windows (TV-Kit)
+
+Download `TV-Kit.zip` from this fork's [latest release](../../releases/latest), extract it and double-click
+`TV-KIT.bat`. It finds the TV (Wireless debugging pairing codes included), backs everything up, shows what it will
+turn off and waits for Enter, installs the launcher GitHub built here with a dock of your most-used apps and a
+nature-photo screensaver, checks the Home button from inside an app, and saves screenshots from the TV.
+`RESTORE.bat` puts everything back. Never uninstalls anything. See [tv-kit/README.txt](tv-kit/README.txt).
+
 ## What's here
 
 | Path | What it is |

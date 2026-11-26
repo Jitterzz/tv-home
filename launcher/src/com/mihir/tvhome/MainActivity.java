@@ -114,6 +114,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         dockApps = getResources().getStringArray(R.array.dock_apps);
+        takeDock(getIntent());
         hidden.addAll(Arrays.asList(getResources().getStringArray(R.array.hidden_apps)));
         hidden.add(getPackageName());
         liveTvPkg = getString(R.string.live_tv_package);
@@ -173,6 +174,7 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         // Home pressed while already home: jump back to the first dock app.
         if (inputsPopup != null) inputsPopup.dismiss();
+        if (takeDock(intent)) buildApps();
         if (!dockCards.isEmpty()) dockCards.get(0).requestFocus();
         scroll.smoothScrollTo(0, 0);
     }
@@ -181,6 +183,26 @@ public class MainActivity extends Activity {
     public void onBackPressed() {
         // Home has nowhere to go back to; Back from the grid returns to the dock.
         if (scroll.getScrollY() > 0 && !dockCards.isEmpty()) dockCards.get(0).requestFocus();
+    }
+
+    /**
+     * TV-Kit sets the dock without a rebuild: am start -n com.mihir.tvhome/.MainActivity --es tvkit.dock "pkg1,pkg2".
+     * The list is kept until it sends another; config.xml's dock_apps is used until then. True if a list came in.
+     */
+    private boolean takeDock(Intent intent) {
+        android.content.SharedPreferences prefs = getSharedPreferences("tvkit", MODE_PRIVATE);
+        String given = intent == null ? null : intent.getStringExtra("tvkit.dock");
+        if (given != null) {
+            prefs.edit().putString("dock", given.trim()).apply();
+            intent.removeExtra("tvkit.dock");
+        }
+        String saved = prefs.getString("dock", "");
+        if (saved != null && !saved.trim().isEmpty()) {
+            List<String> list = new ArrayList<>();
+            for (String p : saved.split(",")) if (!p.trim().isEmpty()) list.add(p.trim());
+            if (!list.isEmpty()) dockApps = list.toArray(new String[0]);
+        }
+        return given != null;
     }
 
     // ---------------------------------------------------------------- layout

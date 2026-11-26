@@ -44,5 +44,17 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <!-- The nature photos as the TV's screensaver (TV-Kit sets it; also in Settings > Screen saver). -->
+        <service
+            android:name=".NatureDream"
+            android:exported="true"
+            android:label="Nature photos"
+            android:permission="android.permission.BIND_DREAM_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.dreams.DreamService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>
