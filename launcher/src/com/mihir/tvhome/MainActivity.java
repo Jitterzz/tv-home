@@ -653,7 +653,20 @@ public class MainActivity extends Activity {
                 if (wm.getConnectionInfo().getNetworkId() == -1) name = "Offline";
             }
         } catch (SecurityException ignored) { }
+        // On a cable the TV isn't on Wi-Fi at all, so say Ethernet rather than Offline.
+        if (onEthernet()) name = "Ethernet";
         wifiPill.setText("◉  " + name);
+    }
+
+    private boolean onEthernet() {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(cm.getActiveNetwork());
+            return caps != null && caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     // ---------------------------------------------------------------- glow
